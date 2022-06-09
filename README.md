@@ -1,0 +1,2 @@
+# graylogPlugin
+graylogPluginDemo
