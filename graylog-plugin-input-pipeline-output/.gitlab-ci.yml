@@ -1,0 +1,153 @@
+#
+# FilePath: /.gitlab-ci.yml
+# CreatedBy: guog (<guog@live.cn>)
+# Copyright: (c) 2020
+# Task: #1
+# git ci/cd script.
+#
+
+stages:
+  - build
+  - release
+
+default:
+  # 可中断
+  interruptible: true
+  image: 172.21.33.10/library/docker:latest
+    # 多个作业之间共享缓存文件
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    untracked: true
+    policy: pull-push
+  tags:
+    - docker
+  services:
+    - name: 172.21.33.10/library/docker:dind
+      alias: docker
+      command:
+        [
+          "--insecure-registry",
+          "172.21.33.10",
+          "--insecure-registry",
+          "172.21.35.11",
+        ]
+
+variables:
+  CI_DEBUG_TRACE: "true" # 启用CI调试模式
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_HOST: tcp://docker:2375
+  HARBOR_IMAGE: ${HARBOR_REGISTRY}/${HARBOR_REGISTRY_PROJECT}/${CI_PROJECT_NAME}
+
+.check_before: &check_before
+  - |
+    if [[ ! -f pom.xml ]]; then
+      echo "No pom.xml found!"
+      exit 1
+    fi
+
+build_master:
+  stage: build
+  before_script:
+    - *check_before
+    - echo $HARBOR_IMAGE
+    - docker version
+    - docker info
+    - echo -n "$HARBOR_PASSWORD" | docker login "$HARBOR_REGISTRY" -u 'robot$smp' --password-stdin
+    # 从pox.xml解析版本号
+    - VERSION=$(grep -m 1 '<version>' pom.xml | awk -F '>' '{ print $2 }' | awk -F '<' '{ print $1 }')
+  after_script:
+  - docker logout "$HARBOR_REGISTRY"
+  script:
+    - docker pull "$HARBOR_IMAGE" || true
+    - >
+      docker build
+      --no-cache
+      --tag ${HARBOR_IMAGE}:${VERSION} .
+    - docker push ${HARBOR_IMAGE}:${VERSION}
+    # 复制构建结果
+    - docker create --name ${CI_PROJECT_NAME}_extract ${HARBOR_IMAGE}:${VERSION}
+    - docker cp ${CI_PROJECT_NAME}_extract:/home/sources/lib ./target
+    # 清理
+    - docker rm -f ${CI_PROJECT_NAME}_extract
+    - docker rmi ${HARBOR_IMAGE}:${VERSION}
+  only:
+    - tiggers
+    - master # 只在master分支触发
+
+release_master:
+  stage: release
+  image:
+    name: 172.21.33.10/minio/mc
+    entrypoint: ['']
+  dependencies:
+    - build_master
+  script:
+    # 添加minio服务器
+    - mc alias set minio $MINIO_HOST $MINIO_ACCESS_KEY $MINIO_SECRET_KEY
+    # 推送到远端,target前不能带./后面必须带/
+    - mc cp -r target/ minio/binaries/${CI_PROJECT_NAME}/master/
+  only:
+    - triggers
+    - master
+
+build_tags:
+  stage: build
+  before_script:
+    - *check_before
+    - echo $HARBOR_IMAGE
+    - docker version
+    - docker info
+    - echo -n "$HARBOR_PASSWORD" | docker login "$HARBOR_REGISTRY" -u 'robot$smp' --password-stdin
+    # 从pox.xml解析版本号
+    - VERSION=$(grep -m 1 '<version>' pom.xml | awk -F '>' '{ print $2 }' | awk -F '<' '{ print $1 }')
+  script:
+    - echo 'Check whether the version value in pox.xml is equal to the git tag.'
+    - GIT_TAG=$(echo -en $CI_COMMIT_REF_NAME | tr -c -d '[:alnum:]_.-' | tr A-Z a-z | sed 's/^[a-zA-Z]*//g' | sed 's/\-$//g')
+    - |
+      if [ $GIT_TAG != $VERSION ]
+      then
+        echo "version confusion!!!"
+        echo "The version is ${VERSION} in pox.xml file."
+        echo "The tag is $CI_COMMIT_REF_NAME} in git."
+        echo "Please check."
+        exit 1
+      else
+        echo "building ${CI_PROJECT_NAME}-${VERSION}.jar file."
+      fi
+    - >
+      docker build
+      --no-cache
+      --tag "$HARBOR_IMAGE:$VERSION"
+      --tag "$HARBOR_IMAGE:$CI_COMMIT_SHORT_SHA"
+      --tag "$HARBOR_IMAGE:$CI_COMMIT_REF_NAME" .
+    - docker push $HARBOR_IMAGE:$VERSION
+    - docker push $HARBOR_IMAGE:$CI_COMMIT_SHORT_SHA
+    - docker push $HARBOR_IMAGE:$CI_COMMIT_REF_NAME
+
+    # 复制构建结果
+    - docker create --name ${CI_PROJECT_NAME}_extract ${HARBOR_IMAGE}:${VERSION}
+    - docker cp ${CI_PROJECT_NAME}_extract:/home/sources/lib ./target
+    # 清理
+    - docker rm -f ${CI_PROJECT_NAME}_extract
+    - docker rmi ${HARBOR_IMAGE}:${VERSION} "$HARBOR_IMAGE:$CI_COMMIT_SHORT_SHA" "$HARBOR_IMAGE:$CI_COMMIT_REF_NAME" || echo "清理资源失败,继续"
+  only:
+    - tiggers
+    - tags
+
+release_tags:
+  stage: release
+  image:
+    name: 172.21.33.10/minio/mc
+    entrypoint: ['']
+  dependencies:
+    - build_tags
+  script:
+    # 添加minio服务器
+    - mc alias set minio $MINIO_HOST $MINIO_ACCESS_KEY $MINIO_SECRET_KEY
+    # 推送到远端,target前不能带./后面必须带/
+    - VERSION=$(grep -m 1 '<version>' pom.xml | awk -F '>' '{ print $2 }' | awk -F '<' '{ print $1 }')
+    - mc cp -r target/ minio/binaries/${CI_PROJECT_NAME}/${VERSION}
+  only:
+    - triggers
+    - tags

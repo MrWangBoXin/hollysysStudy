@@ -1,0 +1,135 @@
+@App:name("Siddhi_correlation_api")
+
+@App:description("Siddhi new version for hollisec-sas")
+
+--input stream
+@source(type = 'http', receiver.url = "http://siddhi:8006/input", @map(type = 'json'))
+define stream inputstream(streamname string, timestamp string, src_ip string, dst_ip string, operate string, protocol string, tag string, level string, uuid string, src_uuid string, rulenum string);
+
+@source(type = 'http', receiver.url = "http://siddhi:8006/agent", @map(type = 'json'))
+define stream agentstream(streamname string, timestamp string, src_ip string, dst_ip string, info string, detail string, tag string, level string, uuid string, src_uuid string, rulenum string);
+
+--output stream
+@sink(type='http', publisher.url='http://beryllium:8080/',method='POST', headers='_Authorization:Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJjazJlanlraDYwMDA0OWIwMm5uc3NxYjh4IiwiaWF0IjoxNjIwMjk1Mjg4LCJleHAiOjQ3NzYwNTUyODh9.RPGietH-ca9912wkZkkIp6fEDBTbg0ApHtI-EqxNxAI_',
+        @map(type='json', validate.json='false',
+        @payload("""{"query":"mutation {\n createOneSiddhiAlert(data: {occurrenceAt:\"{{timestamp}}\", srcIp: \"{{src_ip}}\", dstIp: \"{{dst_ip}}\", operate:\"{{operate}}\", protocol:\"{{protocol}}\",tag: \"{{tag}}\", level: {{level}}, id: \"{{uuid}}\", eventId: \"{{rulenum}}\", parent:{connect:{id:\"{{src_uuid}}\"}\n}\n  }) {\n    id\n  }\n}\n"}""")))
+@sink(type = 'log', prefix = "LOGGER")
+define stream outputstream(timestamp string, src_ip string, dst_ip string, operate string, protocol string, tag string, level string, uuid string, src_uuid string, rulenum string);
+
+--**********************************************
+-- input split-flow streams
+--**********************************************
+@info(name = 'cri_operation')
+from inputstream[ streamname == "cri_operation" ]
+select *
+insert into cri_operation_stream;
+
+@info(name = 'impair_process')
+from inputstream[ streamname == "impair_process" ]
+select *
+insert into impair_process_stream;
+
+@info(name = 'scanning')
+from inputstream[ streamname == "scanning" ]
+select *
+insert into scanning_stream;
+
+@info(name = 'exploit')
+from inputstream[ streamname == "exploit" ]
+select *
+insert into exploit_stream;
+
+@info(name = 'lateral_movement')
+from inputstream[ streamname == "lateral_movement" ]
+select *
+insert into lateral_movement_stream;
+
+@info(name = 'outer_access')
+from inputstream[ streamname == "outer_access" ]
+select *
+insert into outer_access_stream;
+
+@info(name = 'command_control')
+from agentstream[ streamname == "command_control" ]
+select *
+insert into command_control_stream;
+
+@info(name = 'udisk_access')
+from agentstream[ streamname == "udisk_access" ]
+select *
+insert into udisk_access_stream;
+
+--**********************************************
+-- correlation the streams
+--**********************************************
+@info(name = 'cri_op_to_command')
+from cri_operation_stream as co
+join command_control_stream#window.time(10 min) as cc
+	on co.src_ip == cc.src_ip
+select co.timestamp as timestamp, co.src_ip as src_ip, co.dst_ip as dst_ip, co.operate as operate, cc.detail as protocol, str:concat('1:', co.tag, ' to ', cc.tag) as tag, co.level as level, co.uuid as uuid, cc.uuid as src_uuid, co.rulenum as rulenum
+insert into outputstream;
+
+@info(name = 'impair_process_to_command')
+from impair_process_stream as ip
+join command_control_stream#window.time(10 min) as cc
+	on ip.src_ip == cc.src_ip
+select ip.timestamp as timestamp, ip.src_ip as src_ip, ip.dst_ip as dst_ip, ip.operate as operate, cc.detail as protocol, str:concat('2:', ip.tag, ' to ', cc.tag) as tag, ip.level as level, ip.uuid as uuid, cc.uuid as src_uuid, ip.rulenum as rulenum
+insert into outputstream;
+
+@info(name = 'scanning_to_command')
+from scanning_stream as s
+join command_control_stream#window.time(10 min) as cc
+	on s.src_ip == cc.src_ip
+select s.timestamp as timestamp, s.src_ip as src_ip, s.dst_ip as dst_ip, s.operate as operate, cc.detail as protocol, str:concat('3:', s.tag, ' to ', cc.tag) as tag, s.level as level, s.uuid as uuid, cc.uuid as src_uuid, s.rulenum as rulenum
+insert into outputstream;
+
+@info(name = 'expolit_to_command')
+from exploit_stream as e
+join command_control_stream#window.time(10 min) as cc
+	on e.src_ip == cc.src_ip
+select e.timestamp as timestamp, e.src_ip as src_ip, e.dst_ip as dst_ip, e.operate as operate, cc.detail as protocol, str:concat('4:', e.tag, ' to ', cc.tag) as tag, e.level as level, e.uuid as uuid, cc.uuid as src_uuid, e.rulenum as rulenum
+insert into outputstream;
+
+@info(name = 'exploit_to_scanning')
+from exploit_stream as e
+join scanning_stream#window.time(10 min) as s
+	on e.src_ip == s.src_ip  and e.dst_ip == s.dst_ip
+select e.timestamp as timestamp, e.src_ip as src_ip, e.dst_ip as dst_ip, e.operate as operate, s.protocol as protocol, str:concat('5:', e.tag, ' to ', s.tag) as tag, e.level as level, e.uuid as uuid, s.uuid as src_uuid, e.rulenum as rulenum
+insert into outputstream;
+
+@info(name = 'lateral_to_exploit')
+from lateral_movement_stream as lm
+join exploit_stream#window.time(10 min) as e
+	on lm.src_ip == e.src_ip and lm.dst_ip == e.dst_ip and lm.tag != 'add user'
+select lm.timestamp as timestamp, lm.src_ip as src_ip, lm.dst_ip as dst_ip, lm.operate as operate, e.protocol as protocol, str:concat('6:', lm.tag, ' to ', e.tag) as tag, lm.level as level, lm.uuid as uuid, e.uuid as src_uuid, lm.rulenum as rulenum
+insert into outputstream;
+
+@info(name = 'lateral_adduser_to_exploit')
+from lateral_movement_stream as lm
+join exploit_stream#window.time(10 min) as e
+	on lm.dst_ip == e.src_ip and lm.tag == 'add user'
+select lm.timestamp as timestamp, lm.src_ip as src_ip, lm.dst_ip as dst_ip, lm.operate as operate, e.protocol as protocol, str:concat('7:', lm.tag, ' to ', e.tag) as tag, lm.level as level, lm.uuid as uuid, e.uuid as src_uuid, lm.rulenum as rulenum
+insert into outputstream;
+
+@info(name = 'command_to_lateral')
+from command_control_stream as cc
+join lateral_movement_stream#window.time(10 min) as lm
+    on cc.src_ip == lm.dst_ip and lm.tag != 'add user'
+select cc.timestamp as timestamp, lm.src_ip, lm.dst_ip, cc.info as operate, lm.protocol as protocol, str:concat('8:', cc.tag, ' to ', lm.tag) as tag, cc.level as level, cc.uuid as uuid, lm.uuid as src_uuid, cc.rulenum as rulenum
+insert into outputstream;
+
+@info(name = 'command_to_oc')
+from command_control_stream as cc
+join outer_access_stream#window.time(10 min) as oa
+    on cc.src_ip == oa.dst_ip or cc.src_ip == oa.src_ip
+select cc.timestamp as timestamp, cc.src_ip, cc.dst_ip, cc.info as operate, oa.protocol as protocol, str:concat('9:', cc.tag, ' to ', oa.tag) as tag, cc.level as level, cc.uuid as uuid, oa.uuid as src_uuid, cc.rulenum as rulenum
+insert into outputstream;
+
+@info(name = 'command_to_udisk')
+from command_control_stream as cc
+join udisk_access_stream#window.time(10 min) as ua
+    on cc.src_ip == ua.src_ip
+select cc.timestamp as timestamp, cc.src_ip, cc.dst_ip, cc.info as operate, ua.detail as protocol, str:concat('10:', cc.tag, ' to ', ua.tag) as tag, cc.level as level, cc.uuid as uuid, ua.uuid as src_uuid, cc.rulenum as rulenum
+insert into outputstream;
+
+
